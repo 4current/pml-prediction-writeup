@@ -1,1 +1,1 @@
-# pml-prediction-writieup
+# pml-prediction-writeup
