@@ -1,0 +1,303 @@
+---
+title: "Machine Learning Project"
+author: "Richard A Morrisey"
+date: "5/10/2016"
+output: html_document
+---
+
+```{r initial_chunk}
+library(knitr)
+opts_chunk$set(cache=FALSE)
+```
+## Introduction
+
+This study will attempt to use machine learning algorithms using data collected by [Veloso, E. et.al.][WLE]. In which they developed a model to predict good vs. poor weight training form using motion sensors. The sensors were attached to the belt, forearm, arm, and dumbbell of six subjects as they performed dumbell lifts in 5 different ways.
+
+Classe | Activity                           
+-------|----------------------------------
+A      |Correct way                         
+B      |throwing the elbows to the front   
+C      |lifting the dumbbell only halfway    
+D      |lowering the dumbbell only halfway  
+E      |throwing the hips to the front      
+
+Participants:
+
+* adelmo
+* calitos
+* charles
+* eurico
+* jeremy
+* pedro
+
+Here we will independently analyze the data.
+
+## Data 
+
+Here is how and when the data was retrieved:
+```{r, get_data, cache=FALSE}
+
+onetimeDownload <- function(url) {
+        fileName <- sub(".*/(.*)$", "\\1", url)
+        if ( !file.exists(fileName) ) {
+                download.file(url, destfile=fileName, method="curl")
+        } else {
+                file.info(fileName)[,c("size", "mtime")]
+        }
+}
+
+url1 <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+url2 <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+dataSources <- list(url1, url2)
+lapply(dataSources, onetimeDownload)
+
+```
+
+## Exploratory Analysis
+This is what the data looks like:
+```{r, read_dataset, cache=FALSE}
+pmlTraining <- read.csv("pml-training.csv")
+pmlTesting <- read.csv("pml-testing.csv")
+summary(pmlTraining$user_name); summary(pmlTraining$classe)
+nrow(pmlTesting)
+```
+
+Note that the data are not balanced with respect to the user or activity. Also note thet there are only 20 observations in the testing set. As a result, we could not be expected to train based on a time series because any model would be making use of a time sequence and we would not have that information in the test data. The raw data cosissta of the following:
+```{r find_var_names, eval=TRUE}
+var_names <- names(pmlTraining)
+filter_pattern1 <- "X|timestamp|window|name|classe"
+filter_pattern2 <- "^(min_|max_|avg_|var_|stddev_|kurtosis_|skewness_|amplitude_)"
+filter_pattern3 <- "^(pitch|yaw|roll|total)"
+filter_pattern <- paste(filter_pattern1, filter_pattern2, filter_pattern3, sep="|")
+raw_readings <- var_names[-grep(filter_pattern, var_names)]
+raw_readings
+```
+
+It's difficult to get the meaning of the actual timestamps. The sampling rate is 45 Hz so the period should be 1/45 = 0.022 seconds per sample. However, looking at the time stamp deltas, it does not look like the time was collected very uniformly.  Let's look at the first trial. Below is a look at Carlitos A. Ultimately it would be nice to fit splines to the data and resample. However, we will try it a simpler way first.
+
+``` {r, timestamp_analysis, eval=TRUE}
+library("ggplot2")
+
+timings <- subset(pmlTraining, user_name=="carlitos" & classe=="A", select=c(user_name,raw_timestamp_part_1, raw_timestamp_part_2, classe))
+t1 <- timings$raw_timestamp_part_1
+t2 <- timings$raw_timestamp_part_2
+
+hist(log10( diff(t2) + 1000000 * (diff(t2) < 0) ) , breaks=50)
+
+# This function might get used if we want to use time
+time_calcs <- function(timevals) {
+    dt <- diff(timevals)
+    delta_t <- dt  + 1000000 * (dt < 0)
+    delta_t <- c(0, delta_t)
+    running_t <- cumsum(delta_t)
+    list(delta_t=delta_t, running_t=running_t)
+}
+
+```
+
+So now let's rebuild the data frame in a way that we like.
+
+```{r data_reboot, eval=TRUE}
+library(dplyr)
+cleanTraining <- pmlTraining %>%
+    select(user_name, classe, raw_timestamp_part_2,
+           accel_arm_x, accel_arm_y, accel_arm_z,
+           gyros_arm_x, gyros_arm_y, gyros_arm_z,
+           magnet_arm_x, magnet_arm_y, magnet_arm_z,
+           accel_belt_x, accel_belt_y, accel_belt_z,
+           gyros_belt_x, gyros_belt_y, gyros_belt_z,
+           magnet_belt_x, magnet_belt_y, magnet_belt_z,
+           accel_dumbbell_x, accel_dumbbell_y, accel_dumbbell_z,
+           gyros_dumbbell_x, gyros_dumbbell_y, gyros_dumbbell_z,
+           magnet_dumbbell_x, magnet_dumbbell_y, magnet_dumbbell_z,
+           accel_forearm_x, accel_forearm_y, accel_forearm_z,
+           gyros_forearm_x, gyros_forearm_y, gyros_forearm_z,
+           magnet_forearm_x, magnet_forearm_y, magnet_forearm_z) %>%
+    group_by(user_name, classe) %>%
+    mutate(deltat=time_calcs(raw_timestamp_part_2)$delta_t) %>%
+    mutate(time=time_calcs(raw_timestamp_part_2)$running_t/1.0e6) %>%
+    mutate(accel_arm_mag=sqrt(accel_arm_x^2 + accel_arm_y^2 + accel_arm_z^2)) %>%
+    mutate(accel_arm_a1=accel_arm_x/accel_arm_mag) %>%
+    mutate(accel_arm_a2=accel_arm_y/accel_arm_mag) %>%
+    mutate(accel_arm_a3=accel_arm_z/accel_arm_mag) %>%
+    data.frame()
+
+sample_set <- subset(cleanTraining, user_name == "eurico" & classe == "A", select=c(user_name, classe, time, deltat, accel_arm_mag, accel_arm_a1, accel_arm_a2, accel_arm_a3))
+fit <- loess(accel_arm_mag ~ time, sample_set, span=.05)
+pred <- predict(fit, sample_set$time)
+ggplot(sample_set, aes(time)) +
+    #geom_line(aes(y=pred, color="accel_arm_mag")) + 
+    #geom_line(aes(y=accel_arm_a1, color="accel_arm_a1"))
+    #geom_line(aes(y=accel_arm_a2, color="accel_arm_a2"))
+    geom_line(aes(y=accel_arm_a3, color="accel_arm_a3"))
+```
+
+So what did we learn in the graph above? It seems that in the first half of the exercise, the subject is relatively stationary and in the latter half of the exercise is where the repetitieve motion occurs. The direction cosine of the x sensor on the arm is -1 in the first half of the exercise which corresponds to g (the acceleration due to gravity being downward).
+
+## Actual Analysis
+So seems like we can do a lot of complicated things let's just use the machine learning libraries straight up.
+
+```{r, add_covariates, eval=TRUE}
+library(caret)
+# This function is the vector magnitude in cartesian coordinates.
+vec_mag <- function(comp) sqrt(comp[1]^2 + comp[2]^2 + comp[3]^2)
+
+trainingData <- pmlTraining %>%
+    select(user_name, classe, matches("^(accel|gyros|magnet)_.*_(x|y|z)$")) %>%
+    mutate(accel_arm_mag = accel_arm_x^2 + accel_arm_y ^2 + accel_arm_z^2) %>%
+    mutate(accel_arm_a1 = accel_arm_x / accel_arm_mag) %>%
+    mutate(accel_arm_a2 = accel_arm_y / accel_arm_mag) %>%
+    mutate(accel_arm_a3 = accel_arm_z / accel_arm_mag) %>%
+    mutate(accel_belt_mag = accel_belt_x^2 + accel_belt_y^2 + accel_belt_z^2) %>%
+    mutate(accel_belt_a1 = accel_belt_x / accel_belt_mag) %>%
+    mutate(accel_belt_a2 = accel_belt_y / accel_belt_mag) %>%
+    mutate(accel_belt_a3 = accel_belt_z / accel_belt_mag) %>%
+    mutate(accel_dumbbell_mag = accel_dumbbell_x^2+ accel_dumbbell_y^2 +
+                                        accel_dumbbell_z^2) %>%
+    mutate(accel_dumbbell_a1 = accel_dumbbell_x / accel_dumbbell_mag) %>%
+    mutate(accel_dumbbell_a2 = accel_dumbbell_y / accel_dumbbell_mag) %>%
+    mutate(accel_dumbbell_a3 = accel_dumbbell_z / accel_dumbbell_mag) %>%
+    mutate(accel_forearm_mag = accel_forearm_x^2 + accel_forearm_y^2 +
+                                       accel_forearm_z^2) %>%
+    mutate(accel_forearm_a1 = accel_forearm_x / accel_forearm_mag) %>%
+    mutate(accel_forearm_a2 = accel_forearm_y / accel_forearm_mag) %>%
+    mutate(accel_forearm_a3 = accel_forearm_z / accel_forearm_mag)
+```
+
+```{r thin_out, cache=FALSE}
+set.seed(12221)
+training <- data.frame()
+for (user_level in levels(trainingData$user_name)) {
+    for (classe in levels(trainingData$classe)) {
+        chunk <- trainingData %>%
+            filter(user_name == user_level, classe == classe) %>%
+            sample_frac(size = 0.15)
+        training <- merge(training, chunk, all = TRUE)
+    }
+}
+
+inTrain <- createDataPartition(training$classe, p=.6, list=FALSE)
+cvTraining <- training[inTrain,]
+cvTestValid <- training[-inTrain,]
+
+inTrain <- createDataPartition(cvTestValid$classe, p=.5, list=FALSE)
+cvTesting <- cvTestValid[inTrain,]
+cvValidate <- cvTestValid[-inTrain,]
+```
+
+```{r pca_preproc, eval=TRUE}
+set.seed(62433)
+ppObject <- preProcess(cvTraining, method=c("pca"), thresh=0.8)
+ppObject
+
+# Run it through again to actually obtain the data frame
+cvTrainingPCA <- predict(ppObject, newdata=cvTraining)
+cvTestingPCA <- predict(ppObject, newdata=cvTesting)
+cvValidatePCA <- predict(ppObject, newdata=cvValidate)
+```
+
+```{r rf_train, cache=FALSE, eval=TRUE}
+ctrl <- trainControl(method="cv",
+                     number=3,
+                     repeats=1)
+rfFit <- train(classe ~ ., data=cvTrainingPCA, method="rf", trControl = ctrl, verbose=FALSE)
+rfFit
+```
+
+```{r rf_predict, eval=TRUE}
+rfPred <- predict(rfFit, newdata=cvTestingPCA)
+confusionMatrix(rfPred, cvTesting$classe)
+```
+
+```{r gbm_train, eval=TRUE}
+ctrl <- trainControl(method="cv",
+                     number=10,
+                     repeats=1)
+gbmFit <- train(classe ~ ., data=cvTrainingPCA, method="gbm", trControl = ctrl, verbose=FALSE)
+gbmFit
+```
+
+```{r gbm_predict, eval=TRUE}
+gbmPred <- predict(gbmFit, newdata=cvTestingPCA, preProcess=ppObject)
+confusionMatrix(gbmPred, cvTesting$classe)
+```
+
+```{r lda_train, evel=TRUE}
+ctrl <- trainControl(method="cv",
+                     number=25,
+                     repeats=1)
+ldaFit <- train(classe ~ ., data=cvTrainingPCA, method="lda", trControl= ctrl, verbose=FALSE)
+ldaFit
+```
+
+```{r lda_predict, eval=TRUE}
+ldaPred <- predict(ldaFit, newdata=cvTestingPCA)
+confusionMatrix(ldaPred, cvTesting$classe)
+```
+
+```{r stacked_analysis, eval=TRUE}
+# Now use the training data to create a stacked model.
+# in stacked Analysis, the predictedt values of the previous models are the 
+# covariates of a meta-model.
+#
+classe <- cvTraining$classe
+rfPred <- predict(rfFit, newdata=cvTrainingPCA)
+gbmPred<- predict(gbmFit, newdata=cvTrainingPCA)
+ldaPred <- predict(ldaFit, newdata=cvTrainingPCA)
+stackedTrain <- data.frame(classe, rfPred, gbmPred, ldaPred)
+stackedFit <- train(classe ~ ., data=stackedTrain, method="gbm", verbose=FALSE)
+```
+
+```{r stackedValidate, eval=TRUE}
+# Now use the training data to create a stacked model.
+# in stacked Analysis, the predictedt values of the previous models are the 
+# covariates of a meta-model.
+#
+classe <- cvValidate$classe
+rfPred <- predict(rfFit, newdata=cvValidatePCA)
+gbmPred<- predict(gbmFit, newdata=cvValidatePCA)
+ldaPred <- predict(ldaFit, newdata=cvValidatePCA)
+stackedTrain <- data.frame(classe, rfPred, gbmPred, ldaPred)
+stackedFit <- train(classe ~ ., data=stackedTrain, method="gbm", verbose=FALSE)
+predictions <- predict(stackedFit, newData=stackedTrain)
+confusionMatrix(predictions, classe)
+```
+
+## Final Answers
+```{r final, eval=TRUE}
+library(caret)
+
+testingData <- pmlTesting %>%
+    dplyr::select(user_name, matches("^(accel|gyros|magnet)_.*_(x|y|z)$"))  %>%
+    mutate(accel_arm_mag = accel_arm_x^2 + accel_arm_y ^2 + accel_arm_z^2) %>%
+    mutate(accel_arm_a1 = accel_arm_x / accel_arm_mag) %>%
+    mutate(accel_arm_a2 = accel_arm_y / accel_arm_mag) %>%
+    mutate(accel_arm_a3 = accel_arm_z / accel_arm_mag) %>%
+    mutate(accel_belt_mag = accel_belt_x^2 + accel_belt_y^2 + accel_belt_z^2) %>%
+    mutate(accel_belt_a1 = accel_belt_x / accel_belt_mag) %>%
+    mutate(accel_belt_a2 = accel_belt_y / accel_belt_mag) %>%
+    mutate(accel_belt_a3 = accel_belt_z / accel_belt_mag) %>%
+    mutate(accel_dumbbell_mag = accel_dumbbell_x^2+ accel_dumbbell_y^2 +
+                                        accel_dumbbell_z^2) %>%
+    mutate(accel_dumbbell_a1 = accel_dumbbell_x / accel_dumbbell_mag) %>%
+    mutate(accel_dumbbell_a2 = accel_dumbbell_y / accel_dumbbell_mag) %>%
+    mutate(accel_dumbbell_a3 = accel_dumbbell_z / accel_dumbbell_mag) %>%
+    mutate(accel_forearm_mag = accel_forearm_x^2 + accel_forearm_y^2 +
+                                       accel_forearm_z^2) %>%
+    mutate(accel_forearm_a1 = accel_forearm_x / accel_forearm_mag) %>%
+    mutate(accel_forearm_a2 = accel_forearm_y / accel_forearm_mag) %>%
+    mutate(accel_forearm_a3 = accel_forearm_z / accel_forearm_mag)
+
+finalTestingPCA <- predict(ppObject, newdata=testingData)
+rfPred <- predict(rfFit, finalTestingPCA)
+gbmPred <- predict(gbmFit, finalTestingPCA)
+ldaPred <- predict(ldaFit, finalTestingPCA)
+stackedDataFinal <- data.frame(rfPred, gbmPred, ldaPred)
+predFinal <- predict(stackedFit, newdata=stackedDataFinal)
+predFinal
+```
+
+## Conclusion
+Using the most efficient training method is important. I should have just used randomForest heere, that seemsed to give the best accuracy without stacking. 
+
+[WLE]: Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. __Qualitative Activity Recognition of Weight Lifting Exercises.__ Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013.
